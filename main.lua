@@ -22,6 +22,15 @@ local KoRemote = WidgetContainer:extend{
     is_doc_only = false,
 }
 
+-- Module-level singleton server state. KOReader creates a fresh plugin instance for
+-- each UI (FileManager / ReaderUI) and tears the old one down on every document
+-- switch. Keeping the server here — not on `self` — lets it survive those switches,
+-- so the control API stays up while you navigate or change books.
+local S = { running = false }
+
+-- Forward declarations so start/stop can reference each other.
+local start_server, stop_server
+
 local function load_settings()
     local path = DataStorage:getSettingsDir() .. "/koremote_settings.lua"
     local ok, cfg = pcall(dofile, path)
@@ -72,9 +81,9 @@ local function local_ip_towards(peer_ip)
 end
 
 -- Accept one pending TCP connection (non-blocking) and serve it.
-local function serve_once(self)
-    if not self.server then return end
-    local client = self.server:accept()
+local function serve_once()
+    if not S.server then return end
+    local client = S.server:accept()
     if not client then return end
     client:settimeout(2)
     local request_line = client:receive("*l")
@@ -103,90 +112,87 @@ local function serve_once(self)
         else
             req.body = nil
         end
-        local res = self.router:dispatch(req)
+        local res = S.router:dispatch(req)
         client:send(Httpd.build_response(res, rapidjson.encode))
     end
     client:close()
 end
 
 -- Answer one pending UDP discovery probe (non-blocking).
-local function discover_once(self)
-    if not self.disco then return end
-    local data, ip, port = self.disco:receivefrom()
+local function discover_once()
+    if not S.disco then return end
+    local data, ip, port = S.disco:receivefrom()
     if data then
         local reply = Discovery.handle_packet(data, {
-            name = self.cfg.name or "KOReader",
+            name = S.cfg.name or "KOReader",
             ip = local_ip_towards(ip),
-            port = self.cfg.http_port,
+            port = S.cfg.http_port,
             version = meta.version,
         }, rapidjson.encode)
-        if reply then self.disco:sendto(reply, ip, port) end
+        if reply then S.disco:sendto(reply, ip, port) end
     end
 end
 
-function KoRemote:_poll()
-    serve_once(self)
-    discover_once(self)
-    if self.running then
-        UIManager:scheduleIn(0.2, function() self:_poll() end)
-    end
+local function poll()
+    if not S.running then return end
+    serve_once()
+    discover_once()
+    UIManager:scheduleIn(0.2, poll)
 end
 
-function KoRemote:start()
-    if self.running then return end
-    self.cfg = load_settings()
-    if not self.cfg then
-        UIManager:show(InfoMessage:new{
-            text = "KO Remote: set a token in koremote_settings.lua first." })
-        return
-    end
-    self.router = build_router(self.cfg)
+-- Start the singleton server. Idempotent. Returns ok(boolean), err(string|nil).
+start_server = function()
+    if S.running then return true end
+    local cfg = load_settings()
+    if not cfg then return false, "no token set in koremote_settings.lua" end
+    S.cfg = cfg
+    S.router = build_router(cfg)
 
     -- Bind both sockets under pcall so a port conflict (e.g. another server
     -- already on http_port) reports an error instead of crashing KOReader.
     local ok, err = pcall(function()
-        self.server = assert(socket.tcp())
-        self.server:setoption("reuseaddr", true)
-        assert(self.server:bind("*", self.cfg.http_port))
-        self.server:listen(4)
-        self.server:settimeout(0)
+        S.server = assert(socket.tcp())
+        S.server:setoption("reuseaddr", true)
+        assert(S.server:bind("*", cfg.http_port))
+        S.server:listen(4)
+        S.server:settimeout(0)
 
-        self.disco = assert(socket.udp())
-        self.disco:setoption("reuseaddr", true)
-        assert(self.disco:setsockname("*", self.cfg.discovery_port))
-        self.disco:settimeout(0)
+        S.disco = assert(socket.udp())
+        S.disco:setoption("reuseaddr", true)
+        assert(S.disco:setsockname("*", cfg.discovery_port))
+        S.disco:settimeout(0)
     end)
     if not ok then
-        self:stop()
-        UIManager:show(InfoMessage:new{
-            text = "KO Remote failed to start: " .. tostring(err) })
-        return
+        stop_server()
+        return false, tostring(err)
     end
 
-    firewall("open", self.cfg)
-    self.fw_open = true
-    self.running = true
-    self:_poll()
-    UIManager:show(InfoMessage:new{
-        text = string.format("KO Remote on :%d", self.cfg.http_port) })
+    firewall("open", cfg)
+    S.fw_open = true
+    S.running = true
+    poll()
+    return true
 end
 
-function KoRemote:stop()
-    self.running = false
-    if self.server then self.server:close(); self.server = nil end
-    if self.disco then self.disco:close(); self.disco = nil end
-    if self.fw_open and self.cfg then
-        firewall("close", self.cfg)
-        self.fw_open = false
+-- Stop the singleton server and release its firewall hole. Idempotent.
+stop_server = function()
+    S.running = false
+    if S.server then S.server:close(); S.server = nil end
+    if S.disco then S.disco:close(); S.disco = nil end
+    if S.fw_open and S.cfg then
+        firewall("close", S.cfg)
+        S.fw_open = false
     end
 end
 
 -- Auto-start the server on plugin load when the settings opt in (autostart=true),
 -- so the control server comes up without a manual menu tap (e.g. after a reboot).
+-- No-op if the singleton is already running (e.g. after a document switch).
 function KoRemote:init()
+    if S.running then return end
     local cfg = load_settings()
     if cfg and cfg.autostart then
-        UIManager:nextTick(function() self:start() end)
+        UIManager:nextTick(function() start_server() end)
     end
 end
 
@@ -196,18 +202,23 @@ function KoRemote:addToMainMenu(menu_items)
         sub_item_table = {
             {
                 text = "Start server",
-                callback = function() self:start() end,
+                callback = function()
+                    local ok, err = start_server()
+                    UIManager:show(InfoMessage:new{
+                        text = ok
+                            and string.format("KO Remote on :%d", S.cfg.http_port)
+                            or ("KO Remote failed to start: " .. tostring(err)) })
+                end,
             },
             {
                 text = "Stop server",
-                callback = function() self:stop() end,
+                callback = function()
+                    stop_server()
+                    UIManager:show(InfoMessage:new{ text = "KO Remote stopped." })
+                end,
             },
         },
     }
-end
-
-function KoRemote:onCloseWidget()
-    self:stop()
 end
 
 return KoRemote
