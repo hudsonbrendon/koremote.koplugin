@@ -19,6 +19,13 @@ describe("handlers/control POST /control/page", function()
         assert.are.equal("next", api.calls.turn)
     end)
 
+    it("turns the page backward", function()
+        local api = recording_api()
+        local res = Control.page(api, { body = { dir = "prev" } })
+        assert.are.equal(200, res.status)
+        assert.are.equal("prev", api.calls.turn)
+    end)
+
     it("rejects an invalid direction with 400", function()
         local res = Control.page(recording_api(), { body = { dir = "sideways" } })
         assert.are.equal(400, res.status)

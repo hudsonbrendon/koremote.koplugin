@@ -17,6 +17,8 @@ describe("handlers/book GET /book", function()
         assert.are.equal(42, res.json.page)
         assert.are.equal(600, res.json.pages)
         assert.are.equal(7, res.json.percent)
+        assert.are.equal("Herbert", res.json.author)
+        assert.are.equal(3600, res.json.time_spent)
     end)
 
     it("returns 204 when no book is open", function()
