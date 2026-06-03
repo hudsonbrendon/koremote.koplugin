@@ -1,3 +1,4 @@
 *.swp
 .DS_Store
 ha_config.lua
+koremote_settings.lua
