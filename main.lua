@@ -116,6 +116,7 @@ function KoRemote:_poll()
 end
 
 function KoRemote:start()
+    if self.running then return end
     self.cfg = load_settings()
     if not self.cfg then
         UIManager:show(InfoMessage:new{
@@ -124,16 +125,26 @@ function KoRemote:start()
     end
     self.router = build_router(self.cfg)
 
-    self.server = assert(socket.tcp())
-    self.server:setoption("reuseaddr", true)
-    assert(self.server:bind("*", self.cfg.http_port))
-    self.server:listen(4)
-    self.server:settimeout(0)
+    -- Bind both sockets under pcall so a port conflict (e.g. another server
+    -- already on http_port) reports an error instead of crashing KOReader.
+    local ok, err = pcall(function()
+        self.server = assert(socket.tcp())
+        self.server:setoption("reuseaddr", true)
+        assert(self.server:bind("*", self.cfg.http_port))
+        self.server:listen(4)
+        self.server:settimeout(0)
 
-    self.disco = assert(socket.udp())
-    self.disco:setoption("reuseaddr", true)
-    assert(self.disco:setsockname("*", self.cfg.discovery_port))
-    self.disco:settimeout(0)
+        self.disco = assert(socket.udp())
+        self.disco:setoption("reuseaddr", true)
+        assert(self.disco:setsockname("*", self.cfg.discovery_port))
+        self.disco:settimeout(0)
+    end)
+    if not ok then
+        self:stop()
+        UIManager:show(InfoMessage:new{
+            text = "KO Remote failed to start: " .. tostring(err) })
+        return
+    end
 
     self.running = true
     self:_poll()
@@ -145,6 +156,15 @@ function KoRemote:stop()
     self.running = false
     if self.server then self.server:close(); self.server = nil end
     if self.disco then self.disco:close(); self.disco = nil end
+end
+
+-- Auto-start the server on plugin load when the settings opt in (autostart=true),
+-- so the control server comes up without a manual menu tap (e.g. after a reboot).
+function KoRemote:init()
+    local cfg = load_settings()
+    if cfg and cfg.autostart then
+        UIManager:nextTick(function() self:start() end)
+    end
 end
 
 function KoRemote:addToMainMenu(menu_items)
