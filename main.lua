@@ -44,6 +44,16 @@ local function build_router(cfg)
     return r
 end
 
+-- Determine our LAN IP on the interface that routes toward peer_ip.
+-- A connected UDP socket performs no I/O but resolves the local address.
+local function local_ip_towards(peer_ip)
+    local probe = socket.udp()
+    local ok = probe:setpeername(peer_ip, 9)
+    local ip = ok and probe:getsockname() or nil
+    probe:close()
+    return ip or "0.0.0.0"
+end
+
 -- Accept one pending TCP connection (non-blocking) and serve it.
 local function serve_once(self)
     if not self.server then return end
@@ -89,7 +99,7 @@ local function discover_once(self)
     if data then
         local reply = Discovery.handle_packet(data, {
             name = self.cfg.name or "KOReader",
-            ip = self.local_ip or "0.0.0.0",
+            ip = local_ip_towards(ip),
             port = self.cfg.http_port,
             version = meta.version,
         }, rapidjson.encode)
@@ -119,7 +129,6 @@ function KoRemote:start()
     assert(self.server:bind("*", self.cfg.http_port))
     self.server:listen(4)
     self.server:settimeout(0)
-    self.local_ip = self.server:getsockname()
 
     self.disco = assert(socket.udp())
     self.disco:setoption("reuseaddr", true)
