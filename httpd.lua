@@ -7,7 +7,7 @@ local STATUS_TEXT = {
 
 local function parse_query(qs)
     local q = {}
-    for k, v in (qs or ""):gmatch("([^&=]+)=([^&=]+)") do
+    for k, v in (qs or ""):gmatch("([^&=]+)=([^&]*)") do
         q[k] = v
     end
     return q

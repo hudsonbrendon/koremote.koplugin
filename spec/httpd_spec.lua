@@ -19,6 +19,11 @@ describe("Httpd.parse_request", function()
         assert.are.equal("/open", req.path)
         assert.are.equal('{"x":"y"}', req.body)
     end)
+
+    it("keeps '=' inside a query value", function()
+        local req = Httpd.parse_request("GET /x?token=ab=cd&q= HTTP/1.1\r\n\r\n")
+        assert.are.equal("ab=cd", req.query.token)
+    end)
 end)
 
 describe("Httpd.build_response", function()
