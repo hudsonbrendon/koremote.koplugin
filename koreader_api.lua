@@ -45,14 +45,26 @@ function KoreaderApi.model()
 end
 
 function KoreaderApi.storage_free()
-    -- statvfs-backed free bytes for the home dir; nil if unavailable on this device.
-    local ok, util = pcall(require, "ffi/util")
-    if ok and util.statvfs then
-        local home = require("datastorage"):getDataDir()
-        local stat = util.statvfs(home)
-        if stat then return stat.f_bavail * stat.f_bsize end
-    end
-    return nil
+    -- Free bytes on the data partition via KOReader's df-backed helper.
+    local util = require("util")
+    local home = require("datastorage"):getDataDir()
+    local usage = util.diskUsage(home)
+    return usage and usage.available or nil
+end
+
+-- Write a PNG via `write_fn(path)` to a temp file, return its bytes, then delete it.
+-- KOReader's writePNG / Screen:shot write to a file rather than returning bytes.
+local function png_via_tempfile(write_fn)
+    local path = "/tmp/koremote_png_" .. tostring(os.time()) .. ".png"
+    local ok = pcall(write_fn, path)
+    if not ok then os.remove(path); return nil end
+    local f = io.open(path, "rb")
+    if not f then os.remove(path); return nil end
+    local data = f:read("*all")
+    f:close()
+    os.remove(path)
+    if not data or #data == 0 then return nil end
+    return data
 end
 
 function KoreaderApi.wifi_on()
@@ -84,7 +96,7 @@ function KoreaderApi.cover_png()
     if not ui or not ui.document then return nil end
     local cover = ui.document:getCoverPageImage()
     if not cover then return nil end
-    local png = type(cover.writePNG) == "function" and cover:writePNG() or nil
+    local png = png_via_tempfile(function(path) cover:writePNG(path) end)
     if cover.free then cover:free() end
     return png
 end
@@ -117,9 +129,16 @@ end
 
 function KoreaderApi.screenshot_png()
     local Screen = require("device").screen
-    local bb = type(Screen.shot) == "function" and Screen:shot() or Screen.bb
-    local png = bb and type(bb.writePNG) == "function" and bb:writePNG() or nil
-    return png
+    -- Screen:shot(path) writes a PNG of the current framebuffer to a file.
+    if type(Screen.shot) == "function" then
+        return png_via_tempfile(function(path) Screen:shot(path) end)
+    end
+    -- Fallback: dump the framebuffer blitbuffer directly.
+    local bb = Screen.bb
+    if bb and type(bb.writePNG) == "function" then
+        return png_via_tempfile(function(path) bb:writePNG(path) end)
+    end
+    return nil
 end
 
 function KoreaderApi.refresh()

@@ -1,4 +1,5 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Device = require("device")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local DataStorage = require("datastorage")
@@ -28,6 +29,22 @@ local function load_settings()
         return cfg
     end
     return nil
+end
+
+-- On Kindle the firewall's INPUT policy is DROP, so a listening server is
+-- unreachable until we punch a hole for its ports (mirrors KOReader's SSH plugin).
+-- action is "open" (-A, append) or "close" (-D, delete).
+local function firewall(action, cfg)
+    if not Device:isKindle() then return end
+    local d = action == "open" and "-A" or "-D"
+    os.execute(string.format(
+        "iptables %s INPUT -p tcp --dport %d -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT",
+        d, cfg.http_port))
+    os.execute(string.format(
+        "iptables %s OUTPUT -p tcp --sport %d -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+        d, cfg.http_port))
+    os.execute(string.format("iptables %s INPUT -p udp --dport %d -j ACCEPT", d, cfg.discovery_port))
+    os.execute(string.format("iptables %s OUTPUT -p udp --sport %d -j ACCEPT", d, cfg.discovery_port))
 end
 
 local function build_router(cfg)
@@ -146,6 +163,8 @@ function KoRemote:start()
         return
     end
 
+    firewall("open", self.cfg)
+    self.fw_open = true
     self.running = true
     self:_poll()
     UIManager:show(InfoMessage:new{
@@ -156,6 +175,10 @@ function KoRemote:stop()
     self.running = false
     if self.server then self.server:close(); self.server = nil end
     if self.disco then self.disco:close(); self.disco = nil end
+    if self.fw_open and self.cfg then
+        firewall("close", self.cfg)
+        self.fw_open = false
+    end
 end
 
 -- Auto-start the server on plugin load when the settings opt in (autostart=true),
